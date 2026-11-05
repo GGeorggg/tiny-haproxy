@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: ["main", "master"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint (Dockerfile, workflows, scripts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+
+      - name: actionlint
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7
+
+      - name: zizmor (workflow security)
+        run: pipx run zizmor --config .github/zizmor.yml .github/workflows
+
+      - name: shellcheck
+        run: shellcheck scripts/*.sh .devcontainer/*.sh
+
+  image:
+    name: Build, config check, smoke test, scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write # upload SARIF to code scanning
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image (amd64, loaded locally)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: tiny-haproxy:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: haproxy -c (config check with throw-away certs)
+        run: |
+          scripts/gen-test-certs.sh .test-certs
+          docker run --rm --entrypoint haproxy \
+            -v "$PWD/.test-certs/site.pem:/etc/haproxy/certs/site.pem:ro" \
+            -v "$PWD/.test-certs/ca.crt:/etc/haproxy/certs/ca.crt:ro" \
+            tiny-haproxy:ci -c -f /usr/local/etc/haproxy/haproxy.cfg
+
+      - name: Smoke test (mTLS, ACME, geo deny, headers, limits)
+        run: scripts/smoke-test.sh tiny-haproxy:ci
+
+      - name: Trivy config + secret scan (repo)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scanners: misconfig,secret
+          exit-code: "1"
+          severity: HIGH,CRITICAL
+
+      - name: Trivy image scan (SARIF)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: tiny-haproxy:ci
+          format: sarif
+          output: trivy-image.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "0" # reported in code scanning; the gate below fails the job
+
+      - name: Upload SARIF
+        if: always() && github.event.pull_request.head.repo.fork != true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
+      - name: Trivy image gate (fixable HIGH/CRITICAL fails the build)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: tiny-haproxy:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"

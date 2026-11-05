@@ -2,22 +2,33 @@ name: Build and Push Multi-Arch Docker Image
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: ["main", "master"]
+    tags: ["v*.*.*"]
   schedule:
-    # Auto-rebuild weekly on Sunday at midnight to refresh GeoIP/ASN rules
-    - cron: '0 0 * * 0'
+    # Auto-rebuild weekly on Sunday at midnight to refresh GeoIP/ASN lists and base image
+    - cron: "0 0 * * 0"
   workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write
+
+concurrency:
+  group: build-and-push
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write     # build provenance attestation
+      attestations: write
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up QEMU (for ARM build emulation)
         uses: docker/setup-qemu-action@v3
@@ -34,17 +45,72 @@ jobs:
 
       - name: Convert Repository Owner to Lowercase
         id: prep
-        run: |
-          echo "owner_lc=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_OUTPUT
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "owner_lc=${OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Docker metadata (tags + OCI labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ steps.prep.outputs.owner_lc }}/tiny-haproxy
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=long
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      # Gate: never overwrite a good :latest with an image that has fixable HIGH/CRITICAL CVEs
+      - name: Build (amd64) for pre-push scan
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: tiny-haproxy:scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy gate
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: tiny-haproxy:scan
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
 
       - name: Build and Push Docker Image (GHCR)
-        uses: docker/build-push-action@v5
+        id: push
+        uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm/v7,linux/arm64
           push: true
-          tags: |
-            ghcr.io/${{ steps.prep.outputs.owner_lc }}/tiny-haproxy:latest
-            ghcr.io/${{ steps.prep.outputs.owner_lc }}/tiny-haproxy:${{ github.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # BuildKit attestations add extra manifests to the index; disabled to keep
+          # the image index plain for RouterOS' container puller. Provenance is
+          # attached separately below.
+          provenance: false
+          sbom: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/${{ steps.prep.outputs.owner_lc }}/tiny-haproxy
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Generate SBOM (CycloneDX)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: tiny-haproxy:scan
+          format: cyclonedx
+          output: sbom.cdx.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom.cdx.json

@@ -1,0 +1,7 @@
+# Accept tag refs for third-party actions (Dependabot keeps them current).
+# Tighten to "hash-pin" once actions are pinned to commit SHAs.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        "*": ref-pin

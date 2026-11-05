@@ -14,6 +14,28 @@ Ultra-lightweight HAProxy container (~15MB image, <10MB RAM) published directly 
 
 ---
 
+## Required mounts (certificates are NOT in the image)
+
+| Path in container | Content |
+|---|---|
+| `/etc/haproxy/certs/site.pem` | server certificate chain + private key |
+| `/etc/haproxy/certs/ca.crt` | CA used to verify client certificates (mTLS is **mandatory** on 443) |
+
+RouterOS example (copy the files to `usb1/certs` first):
+
+```routeros
+/container/mounts/add name=proxy-certs src=usb1/certs dst=/etc/haproxy/certs
+/container/add remote-image="ggeorggg/tiny-haproxy:latest" interface=veth1 root-dir=usb1/proxy mounts=proxy-certs comment="proxy" memory-limit=16M
+```
+
+Docker example: add `-v /path/to/certs:/etc/haproxy/certs:ro` to the `docker run` command below.
+
+Behaviour notes: TLS 1.3 only, clients without a valid certificate are rejected,
+sources outside the GeoIP/ASN whitelist get `403`, plain HTTP is redirected to HTTPS
+except `/.well-known/acme-challenge/` (reachable from anywhere for Let's Encrypt).
+
+---
+
 ## RouterOS Setup (MikroTik CRS310)
 
 ```routeros
@@ -76,3 +98,29 @@ docker run -d \
   --memory=16m \
   ghcr.io/ggeorggg/tiny-haproxy:latest
 ```
+
+---
+
+## Development
+
+Open the repository in the included **devcontainer** (VS Code / Codespaces) or install Docker, `make`, `openssl`, `jq` and `shellcheck` locally.
+
+```bash
+make help    # list targets
+make lint    # hadolint, actionlint, shellcheck
+make check   # build + haproxy -c with throw-away test certificates
+make test    # behavioural smoke test (mTLS, ACME, geo deny, headers, body limit)
+make scan    # trivy image scan (fixable HIGH/CRITICAL)
+make all     # everything CI runs
+```
+
+### CI/CD
+
+| Workflow | Purpose |
+|---|---|
+| `ci.yml` | hadolint, actionlint, zizmor, shellcheck, `haproxy -c`, smoke test, Trivy (repo + image, SARIF to code scanning) on every PR/push |
+| `codeql.yml` | CodeQL analysis of the GitHub Actions workflows |
+| `build-and-push.yml` | Trivy gate, multi-arch build, push to GHCR, build provenance attestation, SBOM artifact; weekly rebuild refreshes whitelists and base image |
+| `dependabot.yml` | weekly updates for GitHub Actions, Docker base images, devcontainer features |
+
+Whitelist downloads in the Dockerfile fail the build on HTTP errors, non-CIDR content or implausibly small lists.
