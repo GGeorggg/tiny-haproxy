@@ -9,6 +9,7 @@
 #   - remove the entry once the fixed version is in the image
 #
 # Docs: https://trivy.dev/docs/latest/configuration/filtering/
+
 # 1. Vulnerabilities (Scoped CVE Ignores)
 vulnerabilities:
   - id: CVE-2026-78669
@@ -23,6 +24,9 @@ vulnerabilities:
 # 2. Misconfigurations (IaC & Dockerfile Check Ignores)
 misconfigurations:
   - id: DS-0002
+    paths:
+      - "Dockerfile"
     statement: >-
       Root execution is required during entrypoint bootstrapping to start the Avahi mDNS 
       daemon and initialize TLS certificates before privileges are dropped at runtime.
+    expired_at: 2027-01-06
