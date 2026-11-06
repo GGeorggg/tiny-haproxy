@@ -160,17 +160,22 @@ def _parse_kv_name(data: bytes, off: int):
 
 
 def extract_hello_max_frame_size(payload: bytes) -> int:
-    off = 0
+    """HAPROXY-HELLO payload is: <KV-LIST-length varint> <KV-KV-...>."""
     try:
-        while off < len(payload):
+        list_len, off = read_varint(payload, 0)
+        end = off + list_len
+        if end > len(payload):
+            print(f"[dummy-spoa] HELLO: list_len={list_len} exceeds payload", file=sys.stderr)
+            return DEFAULT_MAX_FRAME_SIZE
+        while off < end:
             name, off = _parse_kv_name(payload, off)
             if name == "max-frame-size":
-                if off >= len(payload):
+                if off >= end:
                     return DEFAULT_MAX_FRAME_SIZE
                 vtype = payload[off]
                 off += 1
                 if vtype == SPOE_DATA_T_UINT32:
-                    if off + 4 > len(payload):
+                    if off + 4 > end:
                         return DEFAULT_MAX_FRAME_SIZE
                     (val,) = struct.unpack(">I", payload[off:off + 4])
                     print(f"[dummy-spoa] HELLO max-frame-size={val}", file=sys.stderr)
