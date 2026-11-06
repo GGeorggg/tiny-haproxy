@@ -35,7 +35,7 @@ here. mDNS is therefore done with a small chain instead:
 HAProxy `resolvers mdns` --DNS--> avahi2dns (127.0.0.1:5354) --D-Bus--> avahi-daemon --mDNS--> LAN
 ```
 
-- **avahi-daemon** (with **dbus**) does the actual mDNS lookups and publishes nothing.
+- **avahi-daemon** (part of the Alpine `avahi` package, plus **dbus**) does the actual mDNS lookups and publishes nothing.
 - **avahi2dns** exposes avahi as an ordinary DNS server on `127.0.0.1:5354`.
 - **HAProxy** has no per-domain forwarding. It does not need it: only `server` lines that say
   `resolvers mdns` use that resolver, so no extra forwarding resolver (dnsmasq/unbound) is needed.
@@ -64,7 +64,7 @@ container).
 | Variable | Default | Meaning |
 |---|---|---|
 | `MDNS_ENABLE` | `1` | Set to `0` to skip dbus/avahi/avahi2dns entirely |
-| `AVAHI2DNS_ARGS` | *(empty)* | Extra flags for `avahi2dns`. They must make it listen on `127.0.0.1:5354` (see `avahi2dns -h`) |
+| `AVAHI2DNS_ARGS` | `-a 127.0.0.1 -p 5354 -d local` | Flags for `avahi2dns` (`-a` address, `-p` port, `-d` domains, `-v` debug). If you change address or port, update `nameserver` in `haproxy.cfg.template` too |
 
 If the mDNS stack fails to start, the entrypoint logs a warning and HAProxy starts anyway.
 
@@ -85,8 +85,9 @@ avahi-resolve -n service-api.local      # works -> avahi + repeater are fine
 - avahi-daemon and dbus-daemon start as root, so the image does not switch to a non-root
   `USER` for the whole container. Privilege dropping, if wanted, belongs in HAProxy's `global`
   section (`user`/`group`).
-- `avahi2dns` may only be available in newer Alpine package repositories than the one
-  `haproxy:2.8-alpine` is based on. If `apk add` can't find it, bump the base image or
-  install it from `edge/community`.
+- `avahi2dns` is only packaged in Alpine **edge** (community), and the upstream `amd64` release
+  binary is glibc-linked and does not run on Alpine. The Dockerfile therefore copies the binary
+  out of an `alpine:edge` build stage. That makes the version float with edge; pin it with
+  `apk add avahi2dns=<version>` in that stage if you need reproducible builds.
 - Keep `scripts/entrypoint.sh` and the Dockerfile on LF line endings. CRLF breaks the
   shebang.

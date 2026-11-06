@@ -1,12 +1,19 @@
+# avahi2dns is not in the stable Alpine branch that haproxy:2.8-alpine is built on
+# (only edge/community), so take the binary from a throw-away edge stage instead of
+# mixing edge repositories into the final image.
+FROM alpine:edge AS avahi2dns
+RUN apk add --no-cache avahi2dns && cp "$(command -v avahi2dns)" /avahi2dns
+
 FROM haproxy:2.8-alpine
 USER root
 
 # mDNS on Alpine: musl has no NSS, so nss-mdns cannot work here.
-# Instead: avahi-daemon (needs dbus) answers mDNS, avahi2dns exposes it as a
-# plain DNS server on 127.0.0.1:5354, and the HAProxy `resolvers mdns` section
-# (haproxy.cfg.template) queries that. See README.md.
-# NOTE: avahi2dns may only be available in newer Alpine repos (community/edge).
-RUN apk add --no-cache curl ca-certificates jq openssl dbus avahi avahi-daemon avahi2dns
+# Instead: avahi-daemon (package `avahi`, needs dbus) answers mDNS, avahi2dns exposes
+# it as a plain DNS server on 127.0.0.1:5354, and the HAProxy `resolvers mdns` section
+# (haproxy.cfg.template) queries that. avahi-tools provides avahi-resolve for debugging.
+# See README.md.
+RUN apk add --no-cache curl ca-certificates jq openssl dbus avahi avahi-tools
+COPY --from=avahi2dns /avahi2dns /usr/local/bin/avahi2dns
 
 # Fetch GeoIP CIDRs (AT and surrounding: CH, DE, CZ, SK, HU, SI, IT, HR)
 RUN mkdir -p /etc/haproxy/whitelists && \

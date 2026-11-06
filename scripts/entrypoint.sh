@@ -9,9 +9,9 @@ set -eu
 
 CFG=/usr/local/etc/haproxy/haproxy.cfg
 MDNS_ENABLE="${MDNS_ENABLE:-1}"
-# Must make avahi2dns listen on 127.0.0.1:5354 (the address in the `resolvers mdns`
-# section of haproxy.cfg.template). Check `avahi2dns -h` for the right flags.
-AVAHI2DNS_ARGS="${AVAHI2DNS_ARGS:-}"
+# avahi2dns must listen on 127.0.0.1:5354, the address in the `resolvers mdns` section
+# of haproxy.cfg.template. Flags: -a bind address, -p port, -d domains, -v debug.
+AVAHI2DNS_ARGS="${AVAHI2DNS_ARGS:--a 127.0.0.1 -p 5354 -d local}"
 
 start_mdns() {
   mkdir -p /run/dbus
