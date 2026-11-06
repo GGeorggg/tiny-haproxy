@@ -66,3 +66,7 @@ frontend https_in
     redirect scheme https code 301 if !{ ssl_fc } !is_acme
 
     use_backend acme_backend if is_acme !{ ssl_fc }
+
+frontend healthz
+    bind 127.0.0.1:8404
+    monitor-uri /healthz
