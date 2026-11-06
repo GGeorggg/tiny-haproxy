@@ -72,11 +72,13 @@ else
 fi
 
 # ---- proxy checks ---------------------------------------------------------
-start_proxy() { # extra docker args
+start_proxy() { # extra docker args; NO_CA=1 leaves ca.crt unmounted
+  local ca_args=(-v "$CERTS/ca.crt:/etc/haproxy/certs/ca.crt:ro")
+  if [ "${NO_CA:-0}" = 1 ]; then ca_args=(); fi
   docker rm -f "$PREFIX-proxy" >/dev/null 2>&1 || true
   docker run -d --name "$PREFIX-proxy" --network "container:$PREFIX-backend" \
     -v "$CERTS/site.pem:/etc/haproxy/certs/site.pem:ro" \
-    -v "$CERTS/ca.crt:/etc/haproxy/certs/ca.crt:ro" "$@" "$IMAGE" >/dev/null
+    "${ca_args[@]}" "$@" "$IMAGE" >/dev/null
   for _ in $(seq 1 20); do
     docker run --rm --network "container:$PREFIX-backend" "$CURL_IMG" -fs \
       http://127.0.0.1:8404/healthz >/dev/null 2>&1 && return 0
@@ -128,5 +130,22 @@ echo "== Phase 2: image whitelist (loopback is not in it)"
 start_proxy
 check "non-whitelisted source denied" 403 "$(c "${MTLS[@]}" https://localhost/)"
 check "ACME still allowed"            503 "$(c http://127.0.0.1/.well-known/acme-challenge/x)"
+
+echo "== Phase 3: no ca.crt mounted (placeholder CA, mTLS must fail closed)"
+NO_CA=1 start_proxy -v "$WL/geoip.lst:/etc/haproxy/whitelists/geoip.lst:ro" \
+                    -v "$WL/asns.lst:/etc/haproxy/whitelists/asns.lst:ro"
+if docker logs "$PREFIX-proxy" 2>&1 | grep -q "placeholder CA"; then
+  echo "PASS  placeholder CA warning logged"
+else
+  echo "FAIL  placeholder CA warning missing"; fail=1
+fi
+if docker logs "$PREFIX-proxy" 2>&1 | grep -q "Couldn't open the ca-file"; then
+  echo "FAIL  HAProxy could not open ca-file"; fail=1
+else
+  echo "PASS  HAProxy started without mounted ca.crt"
+fi
+check "valid client cert rejected (placeholder CA)" 000 "$(c "${MTLS[@]}" https://localhost/)"
+check "https without client cert"                  000 "$(c --http1.1 --cacert /certs/ca.crt --connect-to localhost:443:127.0.0.1:443 https://localhost/)"
+check "http -> https redirect still works"         301 "$(c http://127.0.0.1/foo)"
 
 exit "$fail"

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Container entrypoint:
 # 1. (optional) start dbus -> avahi-daemon -> avahi2dns for *.local resolution.
-# 2. Bootstrap a self-signed cert if missing.
+# 2. Bootstrap a self-signed server cert and a placeholder client CA if missing.
 # 3. Assemble haproxy.cfg (assemble-config.sh) from template + rules.d + backends.d.
 # 4. Start the 24h acme.sh renewal loop.
 # 5. exec HAProxy.
@@ -39,6 +39,21 @@ if [ ! -f /etc/haproxy/certs/site.pem ]; then
     -keyout /etc/haproxy/certs/site.pem \
     -out /etc/haproxy/certs/site.pem \
     -subj '/CN=localhost'
+fi
+
+# The 443 bind uses `ca-file ... verify required`, so HAProxy refuses to start without a
+# CA file. If none is mounted, install a throw-away self-signed CA whose private key is
+# discarded immediately: HAProxy starts, but no client certificate can ever validate
+# against it, so every mTLS handshake is rejected (fail closed). Mount a real
+# /etc/haproxy/certs/ca.crt to allow clients.
+if [ ! -f /etc/haproxy/certs/ca.crt ]; then
+  echo 'WARN: /etc/haproxy/certs/ca.crt missing; installed a placeholder CA, no client certificate will be accepted (mTLS fails closed)' >&2
+  CA_KEY="$(mktemp)"
+  openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+    -keyout "$CA_KEY" \
+    -out /etc/haproxy/certs/ca.crt \
+    -subj '/CN=placeholder-ca-no-client-certs-accepted'
+  rm -f "$CA_KEY"
 fi
 
 assemble-config.sh
