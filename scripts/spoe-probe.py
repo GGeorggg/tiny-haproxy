@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-"""Standalone SPOE HELLO framing probe.
+"""Standalone SPOP handshake probe (independent of dummy-spoa.py's code).
 
-Spawns nothing: assumes an agent is listening on 127.0.0.1:9000 inside the
-shared network namespace. Sends a synthetic HAPROXY-HELLO, prints the reply
-frame type, and exits non-zero on failure.
-
-Usage: python spoe-probe.py
+Plays HAProxy against an agent on 127.0.0.1:9000:
+  1. HAPROXY-HELLO  -> expects AGENT-HELLO (101) with FIN, valid version,
+                       max-frame-size, capabilities
+  2. NOTIFY         -> expects ACK (103) with the same stream/frame id
+Exits non-zero on any deviation from the spec.
 """
 import socket
 import struct
 import sys
 
+HAPROXY_HELLO, NOTIFY, AGENT_HELLO, ACK = 1, 3, 101, 103
+FIN = 1
 
-def ev(v: int) -> bytes:
+
+def ev(v):
     out = bytearray()
     while True:
         b = v & 0x7F
@@ -24,41 +27,104 @@ def ev(v: int) -> bytes:
             return bytes(out)
 
 
-def es(s: str) -> bytes:
+def rv(d, o):
+    v = s = 0
+    while True:
+        b = d[o]; o += 1
+        v |= (b & 0x7F) << s
+        if not b & 0x80:
+            return v, o
+        s += 7
+
+
+def name(s):                       # KV key: varint len + bytes, no type byte
     b = s.encode()
-    return bytes([8, len(b)]) + b
+    return ev(len(b)) + b
 
 
-def eu32(v: int) -> bytes:
-    return bytes([3]) + struct.pack(">I", v)
+def sval(s):                       # typed STRING
+    b = s.encode()
+    return bytes([8]) + ev(len(b)) + b
 
 
-payload  = es("version") + es("1.0")
-payload += es("max-frame-size") + eu32(16384)
-payload += es("capabilities") + es("pipelining async")
-body  = b"\x01" + struct.pack(">I", 0) + ev(0) + ev(0) + payload
-frame = struct.pack(">I", len(body)) + body
+def uval(v):                       # typed UINT32 (varint body)
+    return bytes([3]) + ev(v)
 
+
+def frame(ftype, sid, fid, payload, flags=FIN):
+    body = bytes([ftype]) + struct.pack(">I", flags) + ev(sid) + ev(fid) + payload
+    return struct.pack(">I", len(body)) + body
+
+
+def recv_exact(s, n):
+    buf = b""
+    while len(buf) < n:
+        c = s.recv(n - len(buf))
+        if not c:
+            raise ConnectionError("peer closed connection")
+        buf += c
+    return buf
+
+
+def recv_frame(s):
+    (n,) = struct.unpack(">I", recv_exact(s, 4))
+    body = recv_exact(s, n)
+    ftype = body[0]
+    (flags,) = struct.unpack(">I", body[1:5])
+    sid, o = rv(body, 5)
+    fid, o = rv(body, o)
+    return ftype, flags, sid, fid, body[o:]
+
+
+def parse_kv(p):
+    out, o = {}, 0
+    while o < len(p):
+        l, o = rv(p, o)
+        k = p[o:o + l].decode(); o += l
+        t = p[o] & 0x0F; o += 1
+        if t == 8:
+            l, o = rv(p, o)
+            out[k] = p[o:o + l].decode(); o += l
+        elif t in (2, 3, 4, 5):
+            out[k], o = rv(p, o)
+        else:
+            raise ValueError(f"unexpected type {t} for {k}")
+    return out
+
+
+def fail(msg):
+    print(f"FAIL: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+s = socket.create_connection(("127.0.0.1", 9000), 2)
+s.settimeout(3)
 try:
-    s = socket.create_connection(("127.0.0.1", 9000), 2)
-    s.settimeout(3)
-    s.sendall(frame)
-    hdr = s.recv(4, socket.MSG_WAITALL)
-    if len(hdr) < 4:
-        print("FAIL: short length prefix", file=sys.stderr)
-        sys.exit(1)
-    (n,) = struct.unpack(">I", hdr)
-    body = s.recv(n, socket.MSG_WAITALL)
-    if not body:
-        print("FAIL: empty body", file=sys.stderr)
-        sys.exit(1)
-    print(f"reply frame type: {body[0]} len: {n}")
-    # AGENT-HELLO = 101
-    if body[0] != 101:
-        print(f"FAIL: expected AGENT-HELLO (101), got {body[0]}", file=sys.stderr)
-        sys.exit(1)
+    hello = (name("supported-versions") + sval("2.0")
+             + name("max-frame-size") + uval(16384)
+             + name("capabilities") + sval("pipelining,async")
+             + name("engine-id") + sval("probe"))
+    s.sendall(frame(HAPROXY_HELLO, 0, 0, hello))
+
+    ftype, flags, _, _, payload = recv_frame(s)
+    if ftype != AGENT_HELLO:
+        fail(f"expected AGENT-HELLO ({AGENT_HELLO}), got {ftype}")
+    if not flags & FIN:
+        fail("AGENT-HELLO missing FIN flag")
+    kv = parse_kv(payload)
+    for k in ("version", "max-frame-size", "capabilities"):
+        if k not in kv:
+            fail(f"AGENT-HELLO missing '{k}': {kv}")
+    if kv["version"] != "2.0":
+        fail(f"unexpected version {kv['version']!r}")
+    print(f"AGENT-HELLO ok: {kv}")
+
+    s.sendall(frame(NOTIFY, 7, 9, b""))
+    ftype, flags, sid, fid, _ = recv_frame(s)
+    if ftype != ACK or (sid, fid) != (7, 9) or not flags & FIN:
+        fail(f"bad ACK: type={ftype} flags={flags} sid={sid} fid={fid}")
+    print("ACK ok")
+except (OSError, ValueError, IndexError) as exc:
+    fail(str(exc))
 finally:
-    try:
-        s.close()
-    except Exception:
-        pass
+    s.close()

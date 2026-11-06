@@ -11,9 +11,14 @@ Wire format (SPOP/SPOE, HAProxy 2.8+):
                   <stream-id:varint> <frame-id:varint> <payload>
 
   HELLO payload = (<name-length:varint> <name-bytes> <typed-value>)*
+                  NOTE: the key name is NOT a typed value (no 0x08 prefix).
+
+  frame types   HAPROXY-HELLO 1, HAPROXY-DISCONNECT 2, NOTIFY 3,
+                AGENT-HELLO 101, AGENT-DISCONNECT 102, ACK 103
+  flags         every frame we send carries FIN (0x00000001)
 
   typed-value   = <type:1B> <body>
-                  STRING  0x08  <len:1B> <bytes>
+                  STRING  0x08  <len:varint> <bytes>
                   UINT32  0x03  <varint>       # NOTE: varint, not 4B BE
                   INT32   0x02  <varint>
                   INT64   0x04  <varint>
@@ -35,13 +40,18 @@ Diagnostics go to stderr (visible via `docker logs`).
 import socket
 import struct
 import sys
+import threading
 
 # ---- SPOE frame types ----
 FRAME_HAPROXY_HELLO  = 1
-FRAME_NOTIFY         = 2
+FRAME_HAPROXY_DISCON = 2
+FRAME_NOTIFY         = 3
 FRAME_AGENT_HELLO    = 101
-FRAME_AGENT_ACK      = 102
-FRAME_AGENT_DISCON   = 103
+FRAME_AGENT_DISCON   = 102
+FRAME_AGENT_ACK      = 103
+
+# Frame flags. HAProxy rejects any frame without FIN (no fragmentation support).
+FLAG_FIN = 0x00000001
 
 # ---- SPOE data types ----
 SPOE_DATA_T_NULL    = 0
@@ -91,11 +101,16 @@ def encode_varint(value: int) -> bytes:
 
 # ---------------- typed payload helpers ----------------
 
-def encode_string(s: str) -> bytes:
+def encode_name(s: str) -> bytes:
+    """KV key: <len:varint><bytes>, with no type byte."""
     raw = s.encode()
-    if len(raw) > 255:
-        raise ValueError("string too long for single-byte length")
-    return bytes([SPOE_DATA_T_STRING, len(raw)]) + raw
+    return encode_varint(len(raw)) + raw
+
+
+def encode_string(s: str) -> bytes:
+    """Typed STRING value: <0x08><len:varint><bytes>."""
+    raw = s.encode()
+    return bytes([SPOE_DATA_T_STRING]) + encode_varint(len(raw)) + raw
 
 
 def encode_uint32(v: int) -> bytes:
@@ -121,10 +136,7 @@ def skip_value(data: bytes, off: int) -> int:
     if vtype == SPOE_DATA_T_NULL:
         return off
     if vtype in (SPOE_DATA_T_STRING, SPOE_DATA_T_BINARY):
-        if off >= len(data):
-            raise IndexError("length byte truncated")
-        l = data[off]
-        off += 1
+        l, off = read_varint(data, off)
         if off + l > len(data):
             raise IndexError("string bytes run past end")
         return off + l
@@ -132,18 +144,23 @@ def skip_value(data: bytes, off: int) -> int:
 
 # ---------------- frame construction ----------------
 
-def build_frame(frame_type, stream_id, frame_id, payload):
-    flags = 0
+def build_frame(frame_type, stream_id, frame_id, payload, flags=FLAG_FIN):
     meta = struct.pack(">I", flags) + encode_varint(stream_id) + encode_varint(frame_id)
     body = bytes([frame_type]) + meta + payload
     return struct.pack(">I", len(body)) + body
 
 
 def build_agent_hello(version: str, max_frame_size: int) -> bytes:
-    payload  = encode_string("version")        + encode_string(version)
-    payload += encode_string("max-frame-size") + encode_uint32(max_frame_size)
-    payload += encode_string("capabilities")   + encode_string("")
+    payload  = encode_name("version")        + encode_string(version)
+    payload += encode_name("max-frame-size") + encode_uint32(max_frame_size)
+    payload += encode_name("capabilities")   + encode_string("")
     return build_frame(FRAME_AGENT_HELLO, 0, 0, payload)
+
+
+def build_agent_disconnect(status: int, message: str) -> bytes:
+    payload  = encode_name("status-code") + bytes([SPOE_DATA_T_UINT32]) + encode_varint(status)
+    payload += encode_name("message")     + encode_string(message)
+    return build_frame(FRAME_AGENT_DISCON, 0, 0, payload)
 
 
 def build_agent_ack(stream_id, frame_id):
@@ -196,10 +213,7 @@ def parse_hello(payload: bytes) -> dict:
             vtype = payload[off]
             off += 1
             if vtype == SPOE_DATA_T_STRING:
-                if off >= len(payload):
-                    break
-                l = payload[off]
-                off += 1
+                l, off = read_varint(payload, off)
                 if off + l > len(payload):
                     break
                 fields[name] = payload[off:off + l].decode(errors="replace")
@@ -259,9 +273,13 @@ def handle_conn(conn, peer):
                 ack = build_agent_ack(sid, fid)
                 conn.sendall(ack)
 
-            elif frame_type == FRAME_AGENT_DISCON:
-                print("[dummy-spoa] peer sent AGENT-DISCONNECT; closing",
+            elif frame_type == FRAME_HAPROXY_DISCON:
+                print(f"[dummy-spoa] HAPROXY-DISCONNECT: {parse_hello(payload)}",
                       file=sys.stderr)
+                try:
+                    conn.sendall(build_agent_disconnect(0, "normal"))
+                except OSError:
+                    pass
                 break
 
             else:
@@ -290,7 +308,8 @@ def main():
     print(f"[dummy-spoa] listening on {host}:{port}", file=sys.stderr)
     while True:
         conn, peer = srv.accept()
-        handle_conn(conn, peer)
+        threading.Thread(target=handle_conn, args=(conn, peer),
+                         daemon=True).start()
 
 
 if __name__ == "__main__":

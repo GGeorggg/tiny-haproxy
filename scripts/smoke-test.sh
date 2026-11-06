@@ -60,68 +60,8 @@ wait_port 127.0.0.1 9000 || { echo "SPOE agent did not become ready" >&2; exit 1
 # Sends a minimal HAPROXY-HELLO and expects an AGENT-HELLO back. This catches
 # wire-format regressions before HAProxy is ever started.
 echo "== SPOE handshake probe"
-if docker run --rm --network "container:$PREFIX-backend" "$PY_IMG" python - <<'PY'
-import socket, struct, sys
-
-FRAME_HAPROXY_HELLO = 1
-FRAME_AGENT_HELLO   = 101
-SPOE_DATA_T_STRING  = 8
-SPOE_DATA_T_UINT32  = 3
-
-def enc_string(s: str) -> bytes:
-    raw = s.encode()
-    return bytes([SPOE_DATA_T_STRING, len(raw)]) + raw
-
-def enc_uint32(v: int) -> bytes:
-    return bytes([SPOE_DATA_T_UINT32]) + struct.pack(">I", v)
-
-def enc_varint(v: int) -> bytes:
-    out = bytearray()
-    while True:
-        b = v & 0x7F
-        v >>= 7
-        if v:
-            out.append(b | 0x80)
-        else:
-            out.append(b)
-            return bytes(out)
-
-payload = b""
-payload += enc_string("version") + enc_string("1.0")
-payload += enc_string("max-frame-size") + enc_uint32(16384)
-payload += enc_string("capabilities") + enc_string("pipelining async")
-
-body = bytes([FRAME_HAPROXY_HELLO]) + struct.pack(">I", 0) + enc_varint(0) + enc_varint(0) + payload
-frame = struct.pack(">I", len(body)) + body
-
-s = None
-try:
-    s = socket.create_connection(("127.0.0.1", 9000), 2)
-    s.settimeout(3)
-    s.sendall(frame)
-    hdr = s.recv(4, socket.MSG_WAITALL)
-    if len(hdr) < 4:
-        print("FAIL  SPOE handshake: short length prefix", file=sys.stderr)
-        sys.exit(1)
-    (ln,) = struct.unpack(">I", hdr)
-    body = s.recv(ln, socket.MSG_WAITALL)
-    if not body:
-        print("FAIL  SPOE handshake: empty body", file=sys.stderr)
-        sys.exit(1)
-    if body[0] != FRAME_AGENT_HELLO:
-        print(f"FAIL  SPOE handshake: expected frame {FRAME_AGENT_HELLO}, got {body[0]}", file=sys.stderr)
-        sys.exit(1)
-    print("PASS  SPOE handshake (AGENT-HELLO received)")
-except Exception as exc:
-    print(f"FAIL  SPOE handshake: {exc}", file=sys.stderr)
-    sys.exit(1)
-finally:
-    if s is not None:
-        try:
-            s.close()
-        except OSError:
-            pass
-PY
+if docker run --rm --network "container:$PREFIX-backend" \
+    -v "$HERE/spoe-probe.py:/spoe-probe.py:ro" "$PY_IMG" python /spoe-probe.py
 then
   :
 else
