@@ -123,6 +123,7 @@ jobs:
         with:
           scan-type: fs
           scanners: misconfig,secret
+          trivyignores: .trivyignore.yaml
           exit-code: "1"
           severity: HIGH,CRITICAL
 
