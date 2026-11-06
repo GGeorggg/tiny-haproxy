@@ -7,7 +7,7 @@ COPY scripts/fetch-whitelists.sh /usr/local/bin/fetch-whitelists.sh
 RUN /usr/local/bin/fetch-whitelists.sh /out
 
 # ---- Stage 2: runtime ----
-FROM haproxy:2.8-alpine
+FROM haproxy:3.1-alpine
 
 # Stays root on purpose: binding ports 80/443 needs it on RouterOS, where the
 # unprivileged-port sysctl cannot be set. haproxy.cfg drops to the haproxy user
