@@ -1,4 +1,7 @@
 global
+    # Binding 80/443 happens as root; HAProxy then drops to this user.
+    user haproxy
+    group haproxy
     maxconn 10
     tune.bufsize 16384
     ssl-default-bind-ciphersuites TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256
@@ -26,9 +29,6 @@ frontend https_in
     bind *:443 ssl crt /etc/haproxy/certs/site.pem ca-file /etc/haproxy/certs/ca.crt verify optional
     bind *:80
 
-    # =========================================================================
-    # SPOE Filter Initialization
-    # =========================================================================
     filter spoe engine ip-checker config /etc/haproxy/spoe.d/spoe-engine.cnf
 
     # Let's Encrypt HTTP-01 challenge routing
@@ -67,5 +67,4 @@ frontend https_in
     http-response set-header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
     http-response set-header X-Content-Type-Options "nosniff"
     http-response set-header X-Frame-Options "DENY"
-
     # Dynamic rules from /etc/haproxy/rules.d/ are injected below at runtime

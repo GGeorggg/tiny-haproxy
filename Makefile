@@ -20,10 +20,10 @@ certs: ## throw-away test certificates
 	scripts/gen-test-certs.sh $(CERT_DIR)
 
 check: build certs ## haproxy -c against the built image
-	docker run --rm --entrypoint haproxy \
+	docker run --rm --entrypoint sh \
 	  -v "$(CURDIR)/$(CERT_DIR)/site.pem:/etc/haproxy/certs/site.pem:ro" \
 	  -v "$(CURDIR)/$(CERT_DIR)/ca.crt:/etc/haproxy/certs/ca.crt:ro" \
-	  $(IMAGE) -c -f /usr/local/etc/haproxy/haproxy.cfg
+	  $(IMAGE) -c 'assemble-config.sh && haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg'
 
 test: build ## behavioural smoke test
 	scripts/smoke-test.sh $(IMAGE)

@@ -61,10 +61,10 @@ jobs:
       - name: haproxy -c (config check with throw-away certs)
         run: |
           scripts/gen-test-certs.sh .test-certs
-          docker run --rm --entrypoint haproxy \
+          docker run --rm --entrypoint sh \
             -v "$PWD/.test-certs/site.pem:/etc/haproxy/certs/site.pem:ro" \
             -v "$PWD/.test-certs/ca.crt:/etc/haproxy/certs/ca.crt:ro" \
-            tiny-haproxy:ci -c -f /usr/local/etc/haproxy/haproxy.cfg
+            tiny-haproxy:ci -c 'assemble-config.sh && haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg'
 
       - name: Smoke test (mTLS, ACME, geo deny, headers, limits)
         run: scripts/smoke-test.sh tiny-haproxy:ci
@@ -88,8 +88,8 @@ jobs:
           exit-code: "0" # reported in code scanning; the gate below fails the job
 
       - name: Upload SARIF
-        if: always() && github.event.pull_request.head.repo.fork != true
-        uses: github/codeql-action/upload-sarif@v3
+        if: always() && hashFiles('trivy-image.sarif') != '' && github.event.pull_request.head.repo.fork != true
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image

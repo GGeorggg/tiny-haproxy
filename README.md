@@ -82,9 +82,10 @@ avahi-resolve -n service-api.local      # works -> avahi + repeater are fine
 
 ### Caveats
 
-- avahi-daemon and dbus-daemon start as root, so the image does not switch to a non-root
-  `USER` for the whole container. Privilege dropping, if wanted, belongs in HAProxy's `global`
-  section (`user`/`group`).
+- avahi-daemon and dbus-daemon need root, so the image stays root (`USER 0`) and HAProxy drops
+  to the `haproxy` user itself after binding the ports (`user`/`group` in `global`). The
+  whitelists are built in a separate stage by `scripts/fetch-whitelists.sh`, so curl and jq
+  never reach the final image.
 - `avahi2dns` is only packaged in Alpine **edge** (community), and the upstream `amd64` release
   binary is glibc-linked and does not run on Alpine. The Dockerfile therefore copies the binary
   out of an `alpine:edge` build stage. That makes the version float with edge; pin it with
