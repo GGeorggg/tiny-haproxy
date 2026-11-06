@@ -14,7 +14,7 @@ fail=0
 
 # shellcheck disable=SC2317  # invoked via trap
 cleanup() {
-  docker rm -f "$PREFIX-proxy" "$PREFIX-backend" >/dev/null 2>&1 || true
+  docker rm -f "$PREFIX-proxy" "$PREFIX-backend" "$PREFIX-spoa" >/dev/null 2>&1 || true
   rm -rf "$CERTS" "$WL"
 }
 trap cleanup EXIT
@@ -25,7 +25,18 @@ echo "127.0.0.0/8" > "$WL/geoip.lst"; : > "$WL/asns.lst"
 docker run -d --name "$PREFIX-backend" python:3.13-alpine \
   python -m http.server 8080 --bind 127.0.0.1 >/dev/null
 
+docker run -d --name "$PREFIX-spoa" --network "container:$PREFIX-backend" \
+  -v "$HERE/dummy-spoa.py:/dummy-spoa.py:ro" \
+  python:3.13-alpine python /dummy-spoa.py >/dev/null
+
 start_proxy() { # extra docker args
+  # wait for spoa agent running
+  for _ in $(seq 1 15); do
+    docker run --rm --network "container:$PREFIX-backend" "$CURL_IMG" -fs \
+      http://127.0.0.1:9000/ >/dev/null 2>&1 && break
+    sleep 1
+  done
+
   docker rm -f "$PREFIX-proxy" >/dev/null 2>&1 || true
   docker run -d --name "$PREFIX-proxy" --network "container:$PREFIX-backend" \
     -v "$CERTS/site.pem:/etc/haproxy/certs/site.pem:ro" \
