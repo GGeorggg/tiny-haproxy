@@ -92,3 +92,25 @@ avahi-resolve -n service-api.local      # works -> avahi + repeater are fine
   `apk add avahi2dns=<version>` in that stage if you need reproducible builds.
 - Keep `scripts/entrypoint.sh` and the Dockerfile on LF line endings. CRLF breaks the
   shebang.
+
+## Security scanning and accepted findings
+
+CI scans the image with Trivy (`ci.yml`, and again as a gate in `build-and-push.yml` before
+anything is pushed). HIGH/CRITICAL findings that have a fix fail the build.
+
+To accept a finding, add an entry to `.trivyignore.yaml`, which both workflows pass to
+Trivy via `trivyignores`:
+
+```yaml
+vulnerabilities:
+  - id: CVE-2026-12345
+    paths:
+      - "usr/local/bin/some-binary"   # relative to the image root, as Trivy prints it
+    statement: Why this is acceptable here
+    expired_at: 2027-01-06            # the build fails again after this date
+```
+
+Always scope an entry to a `paths` or `purls` match and set `expired_at`, so that accepted
+risks resurface for review instead of being forgotten. Remove the entry once a fixed
+version is in the image. To try it locally:
+`trivy image --ignorefile .trivyignore.yaml --severity HIGH,CRITICAL --ignore-unfixed <image>`.

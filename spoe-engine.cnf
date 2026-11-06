@@ -6,11 +6,7 @@ spoe-agent ip-checker-agent
     timeout idle       30s
     timeout processing 100ms
     use-backend spoe_agent_backend
-
-    # GLOBAL SPOE DEFAULT: Fail-Open
-    # If the SPOA engine fails, times out, or crashes, HAProxy ignores the error
-    # and allows traffic to pass uninterrupted.
-    on-error ignore
+    option continue-on-error
 
 spoe-message check_client_ip
     args src

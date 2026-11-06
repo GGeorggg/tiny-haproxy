@@ -1,0 +1,20 @@
+# Accepted Trivy findings for the image scans in CI (ci.yml and build-and-push.yml).
+# Used via the trivy-action input "trivyignores"; Trivy picks the YAML parser by extension.
+#
+# Rules for entries:
+#   - always scope to a path (relative to the image root, no leading slash) or purls,
+#     never a blanket CVE ignore
+#   - always give a statement (why it is acceptable) and expired_at, so that the
+#     entry fails the build again when it is due for review
+#   - remove the entry once the fixed version is in the image
+#
+# Docs: https://trivy.dev/docs/latest/configuration/filtering/
+vulnerabilities:
+  - id: CVE-2026-78669
+    paths:
+      - "usr/local/bin/avahi2dns"
+    statement: >-
+      golang.org/x/net v0.56.0 is statically compiled into the avahi2dns binary (copied
+      from Alpine edge, fixed in x/net 0.60.0). avahi2dns only serves DNS on 127.0.0.1
+      inside the container and runs no HTTP server. Waiting for an Alpine/upstream rebuild.
+    expired_at: 2027-01-06

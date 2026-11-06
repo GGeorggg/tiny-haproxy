@@ -81,6 +81,7 @@ jobs:
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: tiny-haproxy:ci
+          trivyignores: .trivyignore.yaml
           format: sarif
           output: trivy-image.sarif
           severity: HIGH,CRITICAL
@@ -98,6 +99,7 @@ jobs:
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: tiny-haproxy:ci
+          trivyignores: .trivyignore.yaml
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
