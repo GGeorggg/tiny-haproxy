@@ -39,11 +39,35 @@ except `/.well-known/acme-challenge/` (reachable from anywhere for Let's Encrypt
 ## RouterOS Setup (MikroTik CRS310)
 
 ```routeros
+{
+# Install Required Packages might require reboot
+:local ver [/system/resource/get version];
+:local arch [/system/resource/get architecture-name];
+:local baseUrl "https://download.mikrotik.com/routeros/$ver";
+
+/tool/fetch url="$baseUrl/container-$ver-$arch.npk" dst-path="container-$ver-$arch.npk";
+/tool/fetch url="$baseUrl/rose-storage-$ver-$arch.npk" dst-path="rose-storage-$ver-$arch.npk";
+
+:put "Packages downloaded successfully. Rebooting router to apply packages...";
+/system/reboot;
+}
+
+# Enable container might require (manual) reboot
+/system/device-mode/update container=yes
+
 # Set registry URL to GHCR
 /container/config/set registry-url=https://ghcr.io
 
+# Create interface
+/interface/veth/add name=veth-tiny-haproxy address=10.98.13.2 gateway=10.98.13.254
+
+# Attach USB Disk - format once with btrfs
+
+# Create BTRFS Subvolume
+/disk/btrfs/subvolume/add fs=Mikrotik name=tiny-proxy mount=yes mountpoint=tiny-proxy
+
 # Pull and start container from GitHub
-/container/add remote-image="ggeorggg/tiny-haproxy:latest" interface=veth1 root-dir=usb1/proxy comment="proxy" memory-limit=16M
+/container/add remote-image="ggeorggg/tiny-haproxy:latest" interface=veth-tiny-haproxy root-dir=usb1/proxy comment="proxy" memory-limit=16M
 ```
 
 ### RouterOS Automated Update Script
