@@ -18,11 +18,13 @@ mkdir -p "$LOGDIR"
 
 # shellcheck disable=SC2317  # invoked via trap
 cleanup() {
-  # Capture logs BEFORE removing containers; CI runs cleanup before any later step.
+  # Capture logs BEFORE removing containers. Cap each to 200 lines so the
+  # CI step summary stays under GitHub's 1 MB limit even when HAProxy is
+  # spamming the SPOE retry loop.
   for name in proxy spoa backend; do
     cname="$PREFIX-$name"
     if docker inspect "$cname" >/dev/null 2>&1; then
-      docker logs "$cname" > "$LOGDIR/$name.log" 2>&1 || true
+      docker logs --tail 200 "$cname" > "$LOGDIR/$name.log" 2>&1 || true
     fi
   done
   docker rm -f "$PREFIX-proxy" "$PREFIX-spoa" "$PREFIX-backend" >/dev/null 2>&1 || true
@@ -87,7 +89,7 @@ def enc_varint(v: int) -> bytes:
 payload = b""
 payload += enc_string("version") + enc_string("1.0")
 payload += enc_string("max-frame-size") + enc_uint32(16384)
-payload += enc_string("capabilities") + enc_string("pipelining")
+payload += enc_string("capabilities") + enc_string("pipelining async")
 
 body = bytes([FRAME_HAPROXY_HELLO]) + struct.pack(">I", 0) + enc_varint(0) + enc_varint(0) + payload
 frame = struct.pack(">I", len(body)) + body

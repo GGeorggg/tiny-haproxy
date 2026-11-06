@@ -85,17 +85,14 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Dump captured SPOA/proxy logs into summary
-        if: always() && hashFiles('smoke-logs/*.log') != ''
+      - name: Dump captured SPOA log into summary
+        if: always() && hashFiles('smoke-logs/spoa.log') != ''
         run: |
           {
-            echo '### Smoke test container logs'
-            for f in smoke-logs/*.log; do
-              echo "#### $f"
-              echo '```'
-              cat "$f"
-              echo '```'
-            done
+            echo '### SPOE agent log (tail, 60 lines)'
+            echo '```'
+            tail -n 60 smoke-logs/spoa.log
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload smoke test logs
@@ -105,6 +102,49 @@ jobs:
           name: smoke-logs
           path: smoke-logs/
           if-no-files-found: warn
+
+      - name: SPOE HELLO framing probe (debug)
+        if: failure() && steps.smoke.outcome == 'failure'
+        run: |
+          CID=$(docker run -d --name spoe-probe \
+            -v "$PWD/scripts/dummy-spoa.py:/dummy-spoa.py:ro" \
+            python:3.13-alpine python /dummy-spoa.py)
+          sleep 1
+          docker run --rm --network "container:$CID" python:3.13-alpine \
+            python - <<'PY'
+import socket, struct, sys
+def ev(v):
+    out = bytearray()
+    while True:
+        b = v & 0x7f
+        v >>= 7
+        if v:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            return bytes(out)
+def es(s):
+    b = s.encode()
+    return bytes([8, len(b)]) + b
+def eu32(v):
+    return bytes([3]) + struct.pack(">I", v)
+payload  = es("version") + es("1.0")
+payload += es("max-frame-size") + eu32(16384)
+payload += es("capabilities") + es("pipelining async")
+body  = b"\x01" + struct.pack(">I", 0) + ev(0) + ev(0) + payload
+frame = struct.pack(">I", len(body)) + body
+s = socket.create_connection(("127.0.0.1", 9000), 2)
+s.settimeout(3)
+s.sendall(frame)
+hdr = s.recv(4, socket.MSG_WAITALL)
+(n,) = struct.unpack(">I", hdr)
+body = s.recv(n, socket.MSG_WAITALL)
+print("reply frame type:", body[0], "len:", n)
+s.close()
+PY
+          echo "===== agent log ====="
+          docker logs "$CID" 2>&1 || true
+          docker rm -f "$CID" >/dev/null 2>&1 || true
 
       - name: Trivy config + secret scan (repo)
         uses: aquasecurity/trivy-action@v0.36.0
