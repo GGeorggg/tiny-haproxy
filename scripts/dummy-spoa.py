@@ -5,22 +5,29 @@ Completes the HELLO handshake and replies to every NOTIFY with an empty ACK,
 so HAProxy's `filter spoe` does not block the transaction. Uses only the
 Python standard library.
 
-Wire format (SPOP/SPOE, HAProxy 2.8+):
+Wire format (SPOP/SPOE, HAProxy 3.x):
 
   frame         = <len:4B BE> <type:1B> <flags:4B>
                   <stream-id:varint> <frame-id:varint> <payload>
 
   HELLO payload = (<name-length:varint> <name-bytes> <typed-value>)*
-                  (no leading list-length, no STRING type on names)
+                  (names are NOT typed strings; length is a plain varint)
 
   typed-value   = <type:1B> <body>
                   STRING  0x08  <len:1B> <bytes>
                   UINT32  0x03  <4B BE>
                   (others per SPOP table)
 
-If any part of the HELLO fails to parse, we still reply with a valid
-AGENT-HELLO using DEFAULT_MAX_FRAME_SIZE, because HAProxy only checks that
-the advertised value does not exceed its own; 16384 is always safe.
+  HAPROXY-HELLO fields we care about:
+    supported-versions   STRING   e.g. "2.0"
+    max-frame-size       UINT32
+    engine-id            STRING   opaque; must be echoed in AGENT-HELLO
+
+  AGENT-HELLO we send:
+    version              STRING   one of supported-versions
+    max-frame-size       UINT32   <= HAProxy's value
+    capabilities         STRING
+    engine-id            STRING   echoed from HELLO
 
 Diagnostics go to stderr (visible via `docker logs`).
 """
@@ -49,7 +56,7 @@ SPOE_DATA_T_BINARY  = 9
 
 _FIXED_LEN = {
     SPOE_DATA_T_NULL:   0,
-    SPOE_DATA_T_BOOL:   4,   # bool is sent as int32 on the wire
+    SPOE_DATA_T_BOOL:   4,
     SPOE_DATA_T_INT32:  4,
     SPOE_DATA_T_UINT32: 4,
     SPOE_DATA_T_INT64:  8,
@@ -127,12 +134,12 @@ def build_frame(frame_type: int, stream_id: int, frame_id: int, payload: bytes) 
     return struct.pack(">I", len(body)) + body
 
 
-def build_agent_hello(max_frame_size: int) -> bytes:
-    # HAProxy requires the agent to advertise a version it supports, a
-    # max-frame-size <= the one it sent, and (optionally) capabilities.
-    payload  = encode_string("version")        + encode_string("1.0")
+def build_agent_hello(version: str, max_frame_size: int, engine_id: str) -> bytes:
+    payload  = encode_string("version")        + encode_string(version)
     payload += encode_string("max-frame-size") + encode_uint32(max_frame_size)
     payload += encode_string("capabilities")   + encode_string("pipelining async")
+    if engine_id:
+        payload += encode_string("engine-id")  + encode_string(engine_id)
     return build_frame(FRAME_AGENT_HELLO, 0, 0, payload)
 
 
@@ -159,7 +166,6 @@ def recv_frame(sock: socket.socket):
     if len(body) < 1 + 4:
         raise ValueError("frame too short")
     frame_type = body[0]
-    # body[1:5] = flags (unused)
     sid, off = read_varint(body, 5)
     fid, off = read_varint(body, off)
     return frame_type, sid, fid, body[off:]
@@ -177,35 +183,52 @@ def _parse_kv_name(data: bytes, off: int):
     return name, off + name_len
 
 
-def extract_hello_max_frame_size(payload: bytes) -> int:
-    """Walk the HELLO payload and return the advertised max-frame-size.
-
-    Falls back to DEFAULT_MAX_FRAME_SIZE on any parse anomaly so the agent
-    always replies with a valid AGENT-HELLO. This is intentional: HAProxy's
-    only constraint is that our advertised value be <= the one it sent, and
-    16384 is its default.
-
-    The HELLO payload is a sequence of:
-        <varint name-len> <name-bytes> <typed-value>
-    """
+def parse_hello(payload: bytes) -> dict:
+    """Parse HAPROXY-HELLO into a dict. Best-effort: logs and returns on error."""
+    fields = {}
+    off = 0
     try:
-        off = 0
         while off < len(payload):
             name, off = _parse_kv_name(payload, off)
             if off >= len(payload):
-                return DEFAULT_MAX_FRAME_SIZE
+                break
             vtype = payload[off]
-            if name == "max-frame-size" and vtype == SPOE_DATA_T_UINT32:
-                if off + 1 + 4 > len(payload):
-                    return DEFAULT_MAX_FRAME_SIZE
-                (val,) = struct.unpack(">I", payload[off + 1:off + 5])
-                print(f"[dummy-spoa] HELLO max-frame-size raw={val}", file=sys.stderr)
-                if 0 < val < 0x7FFFFFFF:
-                    return val
-                return DEFAULT_MAX_FRAME_SIZE
-            off = skip_value(payload, off)
+            off += 1
+            if vtype == SPOE_DATA_T_STRING:
+                if off >= len(payload):
+                    break
+                l = payload[off]
+                off += 1
+                if off + l > len(payload):
+                    break
+                fields[name] = payload[off:off + l].decode(errors="replace")
+                off += l
+            elif vtype == SPOE_DATA_T_UINT32:
+                if off + 4 > len(payload):
+                    break
+                (val,) = struct.unpack(">I", payload[off:off + 4])
+                fields[name] = val
+                off += 4
+            else:
+                off = skip_value(payload, off - 1)
     except (IndexError, ValueError, struct.error) as exc:
-        print(f"[dummy-spoa] HELLO walker bailed: {exc}", file=sys.stderr)
+        print(f"[dummy-spoa] HELLO parse bailed: {exc}", file=sys.stderr)
+    return fields
+
+
+def pick_version(supported_versions: str) -> str:
+    """Pick the highest SPOP version the agent supports from HAProxy's list."""
+    tokens = supported_versions.replace(",", " ").split()
+    for preferred in ("2.0", "1.0"):
+        if preferred in tokens:
+            return preferred
+    return "1.0"
+
+
+def extract_max_frame_size(fields: dict) -> int:
+    v = fields.get("max-frame-size")
+    if isinstance(v, int) and 0 < v < 0x7FFFFFFF:
+        return v
     return DEFAULT_MAX_FRAME_SIZE
 
 # ---------------- connection handler ----------------
@@ -222,10 +245,16 @@ def handle_conn(conn: socket.socket, peer):
             )
 
             if frame_type == FRAME_HAPROXY_HELLO:
-                max_size = extract_hello_max_frame_size(payload)
-                hello = build_agent_hello(max_size)
+                fields = parse_hello(payload)
+                print(f"[dummy-spoa] HELLO fields: {fields}", file=sys.stderr)
+                supported = fields.get("supported-versions", "1.0")
+                version = pick_version(supported)
+                max_size = extract_max_frame_size(fields)
+                engine_id = fields.get("engine-id", "")
+                hello = build_agent_hello(version, max_size, engine_id)
                 print(
-                    f"[dummy-spoa] sending AGENT-HELLO max-frame-size={max_size} "
+                    f"[dummy-spoa] sending AGENT-HELLO version={version} "
+                    f"max-frame-size={max_size} engine-id={engine_id!r} "
                     f"({len(hello)} bytes)",
                     file=sys.stderr,
                 )
