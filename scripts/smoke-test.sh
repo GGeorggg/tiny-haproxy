@@ -8,13 +8,23 @@ IMAGE="${1:-tiny-haproxy:dev}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CERTS="$(mktemp -d)"
 WL="$(mktemp -d)"
+LOGDIR="${PWD}/smoke-logs"
 PREFIX="tinyhap-smoke-$$"
 CURL_IMG="curlimages/curl:8.11.1"
 PY_IMG="python:3.13-alpine"
 fail=0
 
+mkdir -p "$LOGDIR"
+
 # shellcheck disable=SC2317  # invoked via trap
 cleanup() {
+  # Capture logs BEFORE removing containers; CI runs cleanup before any later step.
+  for name in proxy spoa backend; do
+    cname="$PREFIX-$name"
+    if docker inspect "$cname" >/dev/null 2>&1; then
+      docker logs "$cname" > "$LOGDIR/$name.log" 2>&1 || true
+    fi
+  done
   docker rm -f "$PREFIX-proxy" "$PREFIX-spoa" "$PREFIX-backend" >/dev/null 2>&1 || true
   rm -rf "$CERTS" "$WL"
 }
@@ -48,7 +58,7 @@ wait_port 127.0.0.1 9000 || { echo "SPOE agent did not become ready" >&2; exit 1
 # Sends a minimal HAPROXY-HELLO and expects an AGENT-HELLO back. This catches
 # wire-format regressions before HAProxy is ever started.
 echo "== SPOE handshake probe"
-docker run --rm --network "container:$PREFIX-backend" "$PY_IMG" python - <<'PY'
+if docker run --rm --network "container:$PREFIX-backend" "$PY_IMG" python - <<'PY'
 import socket, struct, sys
 
 FRAME_HAPROXY_HELLO = 1
@@ -82,6 +92,7 @@ payload += enc_string("capabilities") + enc_string("pipelining")
 body = bytes([FRAME_HAPROXY_HELLO]) + struct.pack(">I", 0) + enc_varint(0) + enc_varint(0) + payload
 frame = struct.pack(">I", len(body)) + body
 
+s = None
 try:
     s = socket.create_connection(("127.0.0.1", 9000), 2)
     s.settimeout(3)
@@ -99,12 +110,21 @@ try:
         print(f"FAIL  SPOE handshake: expected frame {FRAME_AGENT_HELLO}, got {body[0]}", file=sys.stderr)
         sys.exit(1)
     print("PASS  SPOE handshake (AGENT-HELLO received)")
+except Exception as exc:
+    print(f"FAIL  SPOE handshake: {exc}", file=sys.stderr)
+    sys.exit(1)
 finally:
-    try:
-        s.close()
-    except Exception:
-        pass
+    if s is not None:
+        try:
+            s.close()
+        except OSError:
+            pass
 PY
+then
+  :
+else
+  fail=1
+fi
 
 # ---- proxy checks ---------------------------------------------------------
 start_proxy() { # extra docker args

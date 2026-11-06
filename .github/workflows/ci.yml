@@ -85,14 +85,26 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Dump SPOA and proxy logs on smoke failure
-        if: failure() && steps.smoke.outcome == 'failure'
+      - name: Dump captured SPOA/proxy logs into summary
+        if: always() && hashFiles('smoke-logs/*.log') != ''
         run: |
-          for c in $(docker ps -a --filter "name=tinyhap-smoke-" --format '{{.Names}}'); do
-            echo "===== docker logs $c ====="
-            docker logs "$c" 2>&1 || true
-            echo
-          done
+          {
+            echo '### Smoke test container logs'
+            for f in smoke-logs/*.log; do
+              echo "#### $f"
+              echo '```'
+              cat "$f"
+              echo '```'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload smoke test logs
+        if: always() && hashFiles('smoke-logs/*.log') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-logs
+          path: smoke-logs/
+          if-no-files-found: warn
 
       - name: Trivy config + secret scan (repo)
         uses: aquasecurity/trivy-action@v0.36.0
