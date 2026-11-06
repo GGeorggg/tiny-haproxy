@@ -100,6 +100,19 @@ echo "== Phase 1: whitelist contains 127.0.0.0/8"
 start_proxy -v "$WL/geoip.lst:/etc/haproxy/whitelists/geoip.lst:ro" \
             -v "$WL/asns.lst:/etc/haproxy/whitelists/asns.lst:ro"
 for _ in $(seq 1 20); do [ "$(c "${MTLS[@]}" https://localhost/)" = 200 ] && break; sleep 1; done # backend UP
+if [ "$(c "${MTLS[@]}" https://localhost/)" != 200 ]; then
+  echo "---- DIAG: default backend never became healthy" >&2
+  echo "-- direct GET http://127.0.0.1:8080/ from the shared netns:" >&2
+  docker run --rm --network "container:$PREFIX-backend" "$CURL_IMG" -s -o /dev/null \
+    -w 'direct backend: %{http_code}\n' --max-time 5 http://127.0.0.1:8080/ >&2 || true
+  echo "-- mTLS request headers/body from proxy:" >&2
+  docker run --rm --network "container:$PREFIX-backend" -v "$CERTS:/certs:ro" "$CURL_IMG" -si \
+    --max-time 10 "${MTLS[@]}" https://localhost/ 2>&1 | head -20 >&2 || true
+  echo "-- proxy log (tail):" >&2;   docker logs --tail 60 "$PREFIX-proxy" >&2 || true
+  echo "-- backend log (tail):" >&2; docker logs --tail 20 "$PREFIX-backend" >&2 || true
+  echo "-- spoa log (tail):" >&2;    docker logs --tail 30 "$PREFIX-spoa" >&2 || true
+  echo "---- END DIAG" >&2
+fi
 check "http -> https redirect"        301 "$(c http://127.0.0.1/foo)"
 check "ACME reaches acme backend"     503 "$(c http://127.0.0.1/.well-known/acme-challenge/x)"
 check "https with client cert"        200 "$(c "${MTLS[@]}" https://localhost/)"
