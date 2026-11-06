@@ -12,11 +12,74 @@ Ultra-lightweight HAProxy container published on **GitHub Container Registry (GH
 | `backends.d/*.cfg` | Backend definitions |
 | `spoe-engine.cnf` | SPOE agent config |
 | `avahi-daemon.conf` | Resolver-only avahi config (no publishing) |
-| `scripts/entrypoint.sh` | Starts mDNS, creates a temp cert, assembles `haproxy.cfg`, runs HAProxy |
+| `scripts/entrypoint.sh` | Starts mDNS, creates a temp server cert and a placeholder client CA if missing, assembles `haproxy.cfg`, runs HAProxy |
 
 At start-up the entrypoint concatenates the template, `rules.d/*.cfg` and `backends.d/*.cfg`
 into `/usr/local/etc/haproxy/haproxy.cfg`. Mount your own files over those directories to
-customise routing and backends.
+customise routing and backends (see [Persistent data and mount points](#persistent-data-and-mount-points)).
+
+## Persistent data and mount points
+
+Everything written inside the container is lost when the container is recreated. Mount
+these paths from the host (RouterOS: from `/usb1/...`, not internal flash):
+
+| Container path | Mode | What lives there | Mount it to... |
+|---|---|---|---|
+| `/data` | read-write | acme.sh home (`/data/acme`) | keep issued certificates and the ACME account across recreation |
+| `/etc/haproxy/certs` | read-write | `site.pem` (server cert + key), `ca.crt` (client CA for mTLS) | persist the generated self-signed cert and supply your real `ca.crt` |
+| `/etc/haproxy/rules.d` | read-only is fine | `*.cfg` frontend routing rules | change routing without rebuilding the image |
+| `/etc/haproxy/backends.d` | read-only is fine | `*.cfg` backend definitions | change backends without rebuilding the image |
+
+`/etc/haproxy/certs` must be writable: the entrypoint writes `site.pem` there when it is
+missing (self-signed, 365 days) and a placeholder `ca.crt`. Without that mount both are
+regenerated on every container start. Put your real client CA at `ca.crt` in the mounted
+directory. If it is missing, HAProxy still starts, but with a throw-away CA that accepts no
+client certificates (mTLS fails closed), and the entrypoint logs a warning. Replace the file
+and restart to let clients in. `/data` is where acme.sh keeps its state (`--home /data/acme`);
+the image does not install acme.sh yet, so today it only reserves the location.
+
+### Backend configuration and rules
+
+`rules.d/` and `backends.d/` are read **only at container start**; restart the container after
+a change. A mount **replaces the whole directory**, including the defaults baked into the
+image, so the mounted directories must be complete. These pieces are required:
+
+- `backends.d` must define `default_backend`, `acme_backend` and `spoe_agent_backend` (see
+  `backends.d/00-default.cfg` and `99-spoe-agent.cfg` in this repo). The template and
+  `spoe-engine.cnf` reference them.
+- `rules.d` must end with the `default_backend default_backend` line (see
+  `rules.d/01-routing.cfg`). The rules are appended to the last frontend (`https_in`).
+
+Start by copying this repo's `rules.d/` and `backends.d/` to the host, then edit. Files are
+concatenated in alphabetical order, so keep the numeric prefixes. Check a change before
+restarting the real container:
+
+```sh
+docker run --rm --entrypoint sh \
+  -v "$PWD/certs:/etc/haproxy/certs" \
+  -v "$PWD/rules.d:/etc/haproxy/rules.d:ro" \
+  -v "$PWD/backends.d:/etc/haproxy/backends.d:ro" \
+  <image> -c 'assemble-config.sh && haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg'
+```
+
+### MikroTik RouterOS example
+
+Create the directories on the USB disk first (`/file print` should list them), then mount
+them. Parameter names differ between RouterOS 7.x versions, so check them with `?`
+(`/container/mounts/add ?`, `/container/set ?`):
+
+```routeros
+/container/mounts
+add list=tiny-haproxy src=/usb1/tiny-proxy/data        dst=/data
+add list=tiny-haproxy src=/usb1/tiny-proxy/certs       dst=/etc/haproxy/certs
+add list=tiny-haproxy src=/usb1/tiny-proxy/rules.d     dst=/etc/haproxy/rules.d
+add list=tiny-haproxy src=/usb1/tiny-proxy/backends.d  dst=/etc/haproxy/backends.d
+/container set [find name=tiny-haproxy] mountlists=tiny-haproxy
+```
+
+Older 7.x releases use `/container/mounts add name=... src=... dst=...` plus
+`mounts=<names>` on the container instead. Keep `root-dir`, `layer-dir` and the mount sources
+on the same USB disk to avoid wearing out internal flash.
 
 ## mDNS (`*.local`) support
 

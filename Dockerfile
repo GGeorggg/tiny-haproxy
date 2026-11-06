@@ -42,9 +42,12 @@ COPY backends.d/ /etc/haproxy/backends.d/
 COPY avahi-daemon.conf /etc/avahi/avahi-daemon.conf
 COPY --chmod=755 scripts/entrypoint.sh scripts/assemble-config.sh /usr/local/bin/
 
-# Certificates are NOT part of the image, mount them:
+# Certificates are NOT part of the image. Mount /etc/haproxy/certs read-write to persist:
 #   /etc/haproxy/certs/site.pem  (server cert + key; a temporary self-signed one is
 #                                 generated at start-up if missing)
-#   /etc/haproxy/certs/ca.crt    (client CA for mTLS)
+#   /etc/haproxy/certs/ca.crt    (client CA for mTLS; a placeholder that accepts no
+#                                 clients is generated if missing)
+# Also mountable: /data (acme.sh home), /etc/haproxy/rules.d, /etc/haproxy/backends.d
+# (a mount replaces the image defaults). See README.md, "Persistent data and mount points".
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
