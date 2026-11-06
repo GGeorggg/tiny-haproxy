@@ -2,7 +2,7 @@
 # Container entrypoint:
 # 1. (optional) start dbus -> avahi-daemon -> avahi2dns for *.local resolution.
 # 2. Bootstrap a self-signed cert if missing.
-# 3. Assemble haproxy.cfg from template + rules.d/*.cfg + backends.d/*.cfg.
+# 3. Assemble haproxy.cfg (assemble-config.sh) from template + rules.d + backends.d.
 # 4. Start the 24h acme.sh renewal loop.
 # 5. exec HAProxy.
 set -eu
@@ -41,25 +41,7 @@ if [ ! -f /etc/haproxy/certs/site.pem ]; then
     -subj '/CN=localhost'
 fi
 
-{
-  echo '# Auto-generated HAProxy configuration'
-  cat /usr/local/etc/haproxy/haproxy.cfg.template
-  echo ''
-  echo '# ========== DYNAMIC FRONTEND RULES (/etc/haproxy/rules.d/) =========='
-  for r in /etc/haproxy/rules.d/*.cfg; do
-    [ -f "$r" ] || continue
-    echo "# --- Loaded Rule: $r ---"
-    cat "$r"
-    echo ''
-  done
-  echo '# ========== DYNAMIC BACKENDS (/etc/haproxy/backends.d/) =========='
-  for f in /etc/haproxy/backends.d/*.cfg; do
-    [ -f "$f" ] || continue
-    echo "# --- Loaded Backend: $f ---"
-    cat "$f"
-    echo ''
-  done
-} > "$CFG"
+assemble-config.sh
 
 (
   while true; do
