@@ -1,19 +1,13 @@
 #!/usr/bin/env python3
 """Minimal hand-written SPOE agent for CI smoke tests.
 
-Completes the HELLO handshake and replies to every NOTIFY with an empty ACK,
-so HAProxy's `filter spoe` does not block the transaction. Uses only the
-Python standard library.
-
-Wire format (SPOP/SPOE, HAProxy 2.x):
-  frame    = <len:4B BE> <type:1B> <flags:4B> <stream-id:varint> <frame-id:varint> <payload>
-  HELLO payload = <KV-LIST-length:varint> <KV-KV-...>
-  KV pair  = <name:typed-string> <value:typed>
-  typed-string = <type=0x08><len:1B><bytes>
-  typed-uint32 = <type=0x03><value:4B BE>
-
-Diagnostics go to stderr (visible via `docker logs`).
+Diagnostic build: dumps the raw HAPROXY-HELLO payload as hex and walks the
+KV-LIST while printing every name/value encountered. Always replies with a
+valid AGENT-HELLO (max-frame-size 16384) so HAProxy accepts the handshake
+even if our KV walker diverges, which keeps the proxy unblocked while we
+debug the framing.
 """
+import binascii
 import socket
 import struct
 import sys
@@ -39,7 +33,7 @@ SPOE_DATA_T_BINARY  = 9
 
 _FIXED_LEN = {
     SPOE_DATA_T_NULL:   0,
-    SPOE_DATA_T_BOOL:   4,   # bool is sent as int32 on the wire
+    SPOE_DATA_T_BOOL:   4,
     SPOE_DATA_T_INT32:  4,
     SPOE_DATA_T_UINT32: 4,
     SPOE_DATA_T_INT64:  8,
@@ -48,7 +42,7 @@ _FIXED_LEN = {
     SPOE_DATA_T_IPV6:   16,
 }
 
-DEFAULT_MAX_FRAME_SIZE = 16384
+ADVERTISED_MAX_FRAME = 16384  # always reply with this; safe for HAProxy 2.8
 
 # ---------------- varint (unsigned, 7-bit LE) ----------------
 
@@ -89,23 +83,6 @@ def encode_string(s: str) -> bytes:
 def encode_uint32(v: int) -> bytes:
     return bytes([SPOE_DATA_T_UINT32]) + struct.pack(">I", v)
 
-
-def skip_value(data: bytes, off: int) -> int:
-    """Advance past one typed value starting at `off`."""
-    if off >= len(data):
-        raise IndexError("value truncated")
-    vtype = data[off]
-    off += 1
-    if vtype in _FIXED_LEN:
-        return off + _FIXED_LEN[vtype]
-    if vtype in (SPOE_DATA_T_STRING, SPOE_DATA_T_BINARY):
-        if off >= len(data):
-            raise IndexError("length byte truncated")
-        l = data[off]
-        off += 1
-        return off + l
-    raise ValueError(f"unknown SPOE data type {vtype}")
-
 # ---------------- frame construction ----------------
 
 def build_frame(frame_type: int, stream_id: int, frame_id: int, payload: bytes) -> bytes:
@@ -119,7 +96,7 @@ def build_agent_hello(max_frame_size: int) -> bytes:
     payload = b""
     payload += encode_string("version")        + encode_string("1.0")
     payload += encode_string("max-frame-size") + encode_uint32(max_frame_size)
-    payload += encode_string("capabilities")   + encode_string("")
+    payload += encode_string("capabilities")   + encode_string("pipelining async")
     return build_frame(FRAME_AGENT_HELLO, 0, 0, payload)
 
 
@@ -146,59 +123,111 @@ def recv_frame(sock: socket.socket):
     if len(body) < 1 + 4:
         raise ValueError("frame too short")
     frame_type = body[0]
-    # body[1:5] = flags (unused)
     sid, off = read_varint(body, 5)
     fid, off = read_varint(body, off)
     return frame_type, sid, fid, body[off:]
 
-# ---------------- HELLO parsing ----------------
+# ---------------- diagnostic HELLO walker ----------------
 
-def _parse_kv_name(data: bytes, off: int):
-    """Return (name, new_offset) for a typed-string key at `off`."""
-    if off >= len(data):
-        raise IndexError("name offset out of range")
-    vtype = data[off]
-    off += 1
-    if vtype != SPOE_DATA_T_STRING:
-        raise ValueError(f"expected string key, got type {vtype}")
-    if off >= len(data):
-        raise IndexError("name length out of range")
-    l = data[off]
-    off += 1
-    name = data[off:off + l].decode(errors="replace")
-    return name, off + l
+def dump_hello(payload: bytes, peer):
+    print(f"[dummy-spoa] HELLO payload ({len(payload)} bytes) from {peer}:",
+          file=sys.stderr)
+    print("  " + binascii.hexlify(payload).decode(), file=sys.stderr)
+    print("  " + repr(payload), file=sys.stderr)
 
 
-def extract_hello_max_frame_size(payload: bytes) -> int:
-    """HAPROXY-HELLO payload: <KV-LIST-length varint> <KV-KV-...>."""
+def walk_hello(payload: bytes):
+    """Walk the HELLO payload, returning (max_frame_size, saw_capabilities).
+
+    The HAPROXY-HELLO payload begins with a KV-LIST whose leading varint is
+    the number of bytes that follow. Inside, each pair is
+    <typed-string-name><typed-value>. Values are typed exactly like the
+    SPOP data-type table.
+    """
     list_len, off = read_varint(payload, 0)
     end = off + list_len
-    if end > len(payload):
-        raise ValueError(
-            f"HELLO: KV-LIST length {list_len} exceeds payload ({len(payload)} bytes)"
-        )
+    print(f"[dummy-spoa] HELLO KV-LIST length={list_len} (payload ends at {end}, "
+          f"actual={len(payload)})", file=sys.stderr)
+    max_fs = None
+    saw_caps = None
     while off < end:
-        name, off = _parse_kv_name(payload, off)
-        if name == "max-frame-size":
+        pair_start = off
+        # name
+        if payload[off] != SPOE_DATA_T_STRING:
+            print(f"[dummy-spoa] HELLO: at offset {off} expected STRING (0x08), "
+                  f"got 0x{payload[off]:02x}", file=sys.stderr)
+            break
+        off += 1
+        if off >= end:
+            print(f"[dummy-spoa] HELLO: name length byte at {off} runs past end",
+                  file=sys.stderr)
+            break
+        name_len = payload[off]
+        off += 1
+        if off + name_len > end:
+            print(f"[dummy-spoa] HELLO: name bytes {name_len} run past end",
+                  file=sys.stderr)
+            break
+        name = payload[off:off + name_len].decode(errors="replace")
+        off += name_len
+        # value
+        if off >= end:
+            print(f"[dummy-spoa] HELLO: value type byte missing after {name!r}",
+                  file=sys.stderr)
+            break
+        vtype = payload[off]
+        off += 1
+        if vtype == SPOE_DATA_T_STRING:
             if off >= end:
-                raise ValueError("HELLO: max-frame-size value missing")
-            vtype = payload[off]
+                print(f"[dummy-spoa] HELLO: {name} value length missing",
+                      file=sys.stderr)
+                break
+            vlen = payload[off]
             off += 1
-            if vtype != SPOE_DATA_T_UINT32:
-                raise ValueError(
-                    f"HELLO: max-frame-size has unexpected type {vtype}"
-                )
+            if off + vlen > end:
+                print(f"[dummy-spoa] HELLO: {name} value bytes {vlen} run past end",
+                      file=sys.stderr)
+                break
+            value = payload[off:off + vlen].decode(errors="replace")
+            off += vlen
+            print(f"[dummy-spoa] HELLO pair {name!r} = STRING({value!r}) "
+                  f"[{off - pair_start} bytes]", file=sys.stderr)
+            if name == "capabilities":
+                saw_caps = value
+        elif vtype == SPOE_DATA_T_UINT32:
             if off + 4 > end:
-                raise ValueError("HELLO: max-frame-size value truncated")
-            (val,) = struct.unpack(">I", payload[off:off + 4])
-            return val
-        off = skip_value(payload, off)
-    raise ValueError("HELLO: max-frame-size key not present")
+                print(f"[dummy-spoa] HELLO: {name} UINT32 truncated",
+                      file=sys.stderr)
+                break
+            (value,) = struct.unpack(">I", payload[off:off + 4])
+            off += 4
+            print(f"[dummy-spoa] HELLO pair {name!r} = UINT32({value}) "
+                  f"[{off - pair_start} bytes]", file=sys.stderr)
+            if name == "max-frame-size":
+                max_fs = value
+        elif vtype in _FIXED_LEN:
+            n = _FIXED_LEN[vtype]
+            if off + n > end:
+                print(f"[dummy-spoa] HELLO: {name} fixed value truncated",
+                      file=sys.stderr)
+                break
+            off += n
+            print(f"[dummy-spoa] HELLO pair {name!r} = type {vtype} "
+                  f"[{off - pair_start} bytes]", file=sys.stderr)
+        else:
+            print(f"[dummy-spoa] HELLO: {name} has unknown type {vtype} "
+                  f"at offset {off - 1}", file=sys.stderr)
+            break
+    if off != end:
+        print(f"[dummy-spoa] HELLO walker stopped at {off}, expected {end}",
+              file=sys.stderr)
+    return max_fs, saw_caps
 
 # ---------------- connection handler ----------------
 
 def handle_conn(conn: socket.socket, peer):
     print(f"[dummy-spoa] accepted {peer}", file=sys.stderr)
+    first_hello = True
     try:
         while True:
             frame_type, sid, fid, payload = recv_frame(conn)
@@ -209,18 +238,25 @@ def handle_conn(conn: socket.socket, peer):
             )
 
             if frame_type == FRAME_HAPROXY_HELLO:
-                max_size = extract_hello_max_frame_size(payload)
-                hello = build_agent_hello(max_size)
-                print(
-                    f"[dummy-spoa] sending AGENT-HELLO max-frame-size={max_size} "
-                    f"({len(hello)} bytes)",
-                    file=sys.stderr,
-                )
+                if first_hello:
+                    dump_hello(payload, peer)
+                    first_hello = False
+                try:
+                    max_fs, caps = walk_hello(payload)
+                    print(f"[dummy-spoa] HELLO walk result: max-frame-size="
+                          f"{max_fs}, capabilities={caps!r}", file=sys.stderr)
+                except Exception as exc:
+                    print(f"[dummy-spoa] HELLO walker raised: {exc}", file=sys.stderr)
+                # Always reply with a valid AGENT-HELLO so the handshake
+                # succeeds and HAProxy stops resetting.
+                hello = build_agent_hello(ADVERTISED_MAX_FRAME)
+                print(f"[dummy-spoa] sending AGENT-HELLO max-frame-size="
+                      f"{ADVERTISED_MAX_FRAME} ({len(hello)} bytes)",
+                      file=sys.stderr)
                 conn.sendall(hello)
 
             elif frame_type == FRAME_NOTIFY:
                 ack = build_agent_ack(sid, fid)
-                print(f"[dummy-spoa] sending AGENT-ACK ({len(ack)} bytes)", file=sys.stderr)
                 conn.sendall(ack)
 
             elif frame_type == FRAME_AGENT_DISCON:
@@ -233,9 +269,6 @@ def handle_conn(conn: socket.socket, peer):
                 break
 
     except (ConnectionError, ValueError, IndexError, struct.error) as exc:
-        # A malformed HELLO or a protocol violation is fatal for this connection.
-        # HAProxy will see a reset and mark the agent down, which is far easier
-        # to diagnose than a silently accepted wrong max-frame-size.
         print(f"[dummy-spoa] connection ended: {exc}", file=sys.stderr)
     finally:
         try:
