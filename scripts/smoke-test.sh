@@ -30,11 +30,12 @@ docker run -d --name "$PREFIX-spoa" --network "container:$PREFIX-backend" \
   python:3.13-alpine python /dummy-spoa.py >/dev/null
 
 start_proxy() { # extra docker args
-  # wait for spoa agent running
+  # Wait until the SPOE agent is listening (plain TCP, not HTTP).
   for _ in $(seq 1 15); do
-    docker run --rm --network "container:$PREFIX-backend" "$CURL_IMG" -fs \
-      http://127.0.0.1:9000/ >/dev/null 2>&1 && break
+    docker run --rm --network "container:$PREFIX-backend" alpine:3.20 \
+      sh -c 'nc -z 127.0.0.1 9000' >/dev/null 2>&1 && break
     sleep 1
+    echo ... waiting for SPOA agent on 127.0.0.1 9000/tcp
   done
 
   docker rm -f "$PREFIX-proxy" >/dev/null 2>&1 || true
