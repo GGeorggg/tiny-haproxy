@@ -9,6 +9,7 @@
 #   - remove the entry once the fixed version is in the image
 #
 # Docs: https://trivy.dev/docs/latest/configuration/filtering/
+# 1. Vulnerabilities (Scoped CVE Ignores)
 vulnerabilities:
   - id: CVE-2026-78669
     paths:
@@ -18,3 +19,10 @@ vulnerabilities:
       from Alpine edge, fixed in x/net 0.60.0). avahi2dns only serves DNS on 127.0.0.1
       inside the container and runs no HTTP server. Waiting for an Alpine/upstream rebuild.
     expired_at: 2027-01-06
+
+# 2. Misconfigurations (IaC & Dockerfile Check Ignores)
+misconfigurations:
+  - id: DS-0002
+    statement: >-
+      Root execution is required during entrypoint bootstrapping to start the Avahi mDNS 
+      daemon and initialize TLS certificates before privileges are dropped at runtime.
