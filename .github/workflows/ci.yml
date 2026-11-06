@@ -110,38 +110,10 @@ jobs:
             -v "$PWD/scripts/dummy-spoa.py:/dummy-spoa.py:ro" \
             python:3.13-alpine python /dummy-spoa.py)
           sleep 1
-          docker run --rm --network "container:$CID" python:3.13-alpine \
-            python - <<'PY'
-import socket, struct, sys
-def ev(v):
-    out = bytearray()
-    while True:
-        b = v & 0x7f
-        v >>= 7
-        if v:
-            out.append(b | 0x80)
-        else:
-            out.append(b)
-            return bytes(out)
-def es(s):
-    b = s.encode()
-    return bytes([8, len(b)]) + b
-def eu32(v):
-    return bytes([3]) + struct.pack(">I", v)
-payload  = es("version") + es("1.0")
-payload += es("max-frame-size") + eu32(16384)
-payload += es("capabilities") + es("pipelining async")
-body  = b"\x01" + struct.pack(">I", 0) + ev(0) + ev(0) + payload
-frame = struct.pack(">I", len(body)) + body
-s = socket.create_connection(("127.0.0.1", 9000), 2)
-s.settimeout(3)
-s.sendall(frame)
-hdr = s.recv(4, socket.MSG_WAITALL)
-(n,) = struct.unpack(">I", hdr)
-body = s.recv(n, socket.MSG_WAITALL)
-print("reply frame type:", body[0], "len:", n)
-s.close()
-PY
+          docker cp "$PWD/scripts/spoe-probe.py" "$CID:/spoe-probe.py"
+          docker run --rm --network "container:$CID" \
+            -v "$PWD/scripts/spoe-probe.py:/spoe-probe.py:ro" \
+            python:3.13-alpine python /spoe-probe.py || true
           echo "===== agent log ====="
           docker logs "$CID" 2>&1 || true
           docker rm -f "$CID" >/dev/null 2>&1 || true
