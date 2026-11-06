@@ -52,6 +52,7 @@ check() { # name expected actual
 echo "== Phase 1: whitelist contains 127.0.0.0/8"
 start_proxy -v "$WL/geoip.lst:/etc/haproxy/whitelists/geoip.lst:ro" \
             -v "$WL/asns.lst:/etc/haproxy/whitelists/asns.lst:ro"
+for _ in $(seq 1 20); do [ "$(c "${MTLS[@]}" https://localhost/)" = 200 ] && break; sleep 1; done # backend UP
 check "http -> https redirect"        301 "$(c http://127.0.0.1/foo)"
 check "ACME reaches acme backend"     503 "$(c http://127.0.0.1/.well-known/acme-challenge/x)"
 check "https with client cert"        200 "$(c "${MTLS[@]}" https://localhost/)"
