@@ -67,7 +67,19 @@ jobs:
             tiny-haproxy:ci -c 'assemble-config.sh && haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg'
 
       - name: Smoke test (mTLS, ACME, geo deny, headers, limits)
+        id: smoke
         run: scripts/smoke-test.sh tiny-haproxy:ci
+
+      - name: Dump assembled haproxy.cfg to summary
+        if: failure() && steps.smoke.outcome == 'failure'
+        run: |
+          echo '### Assembled haproxy.cfg' >> "$GITHUB_STEP_SUMMARY"
+          echo '```haproxy' >> "$GITHUB_STEP_SUMMARY"
+          docker run --rm --entrypoint sh \
+            -v "$PWD/.test-certs/site.pem:/etc/haproxy/certs/site.pem:ro" \
+            -v "$PWD/.test-certs/ca.crt:/etc/haproxy/certs/ca.crt:ro" \
+            tiny-haproxy:ci -c 'assemble-config.sh && cat /usr/local/etc/haproxy/haproxy.cfg' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Trivy config + secret scan (repo)
         uses: aquasecurity/trivy-action@v0.36.0
