@@ -25,6 +25,13 @@ resolvers mdns
     hold valid 10s
     hold nx    5s
 
+frontend healthz
+    bind 127.0.0.1:8404
+    monitor-uri /healthz
+
+# NOTE: https_in must stay the LAST frontend in this file. assemble-config.sh appends
+# rules.d/*.cfg right after the template, and those lines (use_backend, default_backend)
+# belong to whichever frontend comes last.
 frontend https_in
     bind *:443 ssl crt /etc/haproxy/certs/site.pem ca-file /etc/haproxy/certs/ca.crt verify required
     bind *:80
@@ -66,7 +73,3 @@ frontend https_in
     redirect scheme https code 301 if !{ ssl_fc } !is_acme
 
     use_backend acme_backend if is_acme !{ ssl_fc }
-
-frontend healthz
-    bind 127.0.0.1:8404
-    monitor-uri /healthz
