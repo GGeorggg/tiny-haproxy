@@ -13,7 +13,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: build-and-push
+  # Per-ref queue (no cancellation) is safest for registry pushes: aborting a
+  # multi-arch push mid-flight can leave the image index partially populated.
+  group: build-and-push-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
