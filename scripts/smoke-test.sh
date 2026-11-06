@@ -8,6 +8,9 @@ IMAGE="${1:-tiny-haproxy:dev}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CERTS="$(mktemp -d)"
 WL="$(mktemp -d)"
+# mktemp -d is mode 0700; curlimages/curl runs as a non-root user and must be
+# able to read the bind-mounted certs (otherwise curl exits 58 / 000).
+chmod 755 "$CERTS" "$WL"
 LOGDIR="${PWD}/smoke-logs"
 PREFIX="tinyhap-smoke-$$"
 CURL_IMG="curlimages/curl:8.11.1"
@@ -104,7 +107,7 @@ check "https without client cert"     000 "$(c --http1.1 --cacert /certs/ca.crt 
 check "TLS 1.2 refused"               000 "$(c "${MTLS[@]}" --tls-max 1.2 https://localhost/)"
 check "oversized Content-Length"      413 "$(c "${MTLS[@]}" -X POST -H 'Content-Length: 9000000' -H 'Expect:' -d x https://localhost/)"
 hdrs="$(docker run --rm --network "container:$PREFIX-backend" -v "$CERTS:/certs:ro" "$CURL_IMG" \
-        -sI --max-time 10 "${MTLS[@]}" https://localhost/ | tr -d '\r')"
+        -sI --max-time 10 "${MTLS[@]}" https://localhost/ | tr -d '\r' || true)"
 if grep -qi '^strict-transport-security:' <<<"$hdrs"; then echo "PASS  HSTS header set"; else echo "FAIL  HSTS header missing"; fail=1; fi
 if grep -qi '^server:' <<<"$hdrs"; then echo "FAIL  Server header leaked"; fail=1; else echo "PASS  Server header removed"; fi
 
