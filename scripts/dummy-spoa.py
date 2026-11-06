@@ -18,7 +18,7 @@ FRAME_AGENT_HELLO    = 101
 FRAME_AGENT_ACK      = 102
 FRAME_AGENT_DISCON   = 103
 
-# ---- SPOE data types ----
+# ---- SPOE data types (SPOP spec) ----
 SPOE_DATA_T_NULL    = 0
 SPOE_DATA_T_BOOL    = 1
 SPOE_DATA_T_INT32   = 2
@@ -30,10 +30,9 @@ SPOE_DATA_T_IPV6    = 7
 SPOE_DATA_T_STRING  = 8
 SPOE_DATA_T_BINARY  = 9
 
-# Map fixed-size type -> byte length, for skipping unknown values safely.
 _FIXED_LEN = {
     SPOE_DATA_T_NULL:   0,
-    SPOE_DATA_T_BOOL:   4,   # sent as int32 on the wire
+    SPOE_DATA_T_BOOL:   4,
     SPOE_DATA_T_INT32:  4,
     SPOE_DATA_T_UINT32: 4,
     SPOE_DATA_T_INT64:  8,
@@ -44,7 +43,7 @@ _FIXED_LEN = {
 
 DEFAULT_MAX_FRAME_SIZE = 16384
 
-# ---------------- varint (unsigned, 7-bit little endian) ----------------
+# ---------------- varint ----------------
 
 def read_varint(data: bytes, off: int):
     shift = 0
@@ -84,8 +83,7 @@ def encode_uint32(v: int) -> bytes:
     return bytes([SPOE_DATA_T_UINT32]) + struct.pack(">I", v)
 
 
-def skip_value(data: bytes, off: int):
-    """Given a typed value at `off`, return the offset just after it."""
+def skip_value(data: bytes, off: int) -> int:
     if off >= len(data):
         raise IndexError("value truncated")
     vtype = data[off]
@@ -110,9 +108,8 @@ def build_frame(frame_type: int, stream_id: int, frame_id: int, payload: bytes) 
 
 
 def build_agent_hello(max_frame_size: int) -> bytes:
-    # Must not exceed what HAProxy offered.
     payload = b""
-    payload += encode_string("version")       + encode_string("1.0")
+    payload += encode_string("version")        + encode_string("1.0")
     payload += encode_string("max-frame-size") + encode_uint32(max_frame_size)
     payload += encode_string("capabilities")   + encode_string("")
     return build_frame(FRAME_AGENT_HELLO, 0, 0, payload)
@@ -141,39 +138,13 @@ def recv_frame(sock: socket.socket):
     if len(body) < 1 + 4:
         raise ValueError("frame too short")
     frame_type = body[0]
-    # body[1:5] = flags
     sid, off = read_varint(body, 5)
     fid, off = read_varint(body, off)
     return frame_type, sid, fid, body[off:]
 
 # ---------------- HELLO parsing ----------------
 
-def extract_max_frame_size(payload: bytes) -> int:
-    """Walk the KV-LIST at the start of HAPROXY-HELLO and find max-frame-size."""
-    off = 0
-    try:
-        while off < len(payload):
-            name, off = _parse_kv_name(payload, off)
-            if name == "max-frame-size":
-                # value follows
-                if off >= len(payload):
-                    return DEFAULT_MAX_FRAME_SIZE
-                vtype = payload[off]
-                off += 1
-                if vtype == SPOE_DATA_T_UINT32:
-                    if off + 4 > len(payload):
-                        return DEFAULT_MAX_FRAME_SIZE
-                    (val,) = struct.unpack(">I", payload[off:off + 4])
-                    return val
-                # wrong type; skip and keep looking
-            off = skip_value(payload, off)
-    except (IndexError, ValueError) as exc:
-        print(f"[dummy-spoa] HELLO parse failed: {exc}", file=sys.stderr)
-    return DEFAULT_MAX_FRAME_SIZE
-
-
 def _parse_kv_name(data: bytes, off: int):
-    """Return (name, new_offset) for a typed string at `off`."""
     if off >= len(data):
         raise IndexError("name offset out of range")
     vtype = data[off]
@@ -186,6 +157,28 @@ def _parse_kv_name(data: bytes, off: int):
     off += 1
     name = data[off:off + l].decode(errors="replace")
     return name, off + l
+
+
+def extract_hello_max_frame_size(payload: bytes) -> int:
+    off = 0
+    try:
+        while off < len(payload):
+            name, off = _parse_kv_name(payload, off)
+            if name == "max-frame-size":
+                if off >= len(payload):
+                    return DEFAULT_MAX_FRAME_SIZE
+                vtype = payload[off]
+                off += 1
+                if vtype == SPOE_DATA_T_UINT32:
+                    if off + 4 > len(payload):
+                        return DEFAULT_MAX_FRAME_SIZE
+                    (val,) = struct.unpack(">I", payload[off:off + 4])
+                    print(f"[dummy-spoa] HELLO max-frame-size={val}", file=sys.stderr)
+                    return val
+            off = skip_value(payload, off)
+    except (IndexError, ValueError) as exc:
+        print(f"[dummy-spoa] HELLO parse failed: {exc}", file=sys.stderr)
+    return DEFAULT_MAX_FRAME_SIZE
 
 # ---------------- connection handler ----------------
 
@@ -201,9 +194,7 @@ def handle_conn(conn: socket.socket, peer):
             )
 
             if frame_type == FRAME_HAPROXY_HELLO:
-                max_size = extract_max_frame_size(payload)
-                # Clamp to a sane value; must be <= HAProxy's own max-frame-size,
-                # which we cannot know beyond what we parsed.
+                max_size = extract_hello_max_frame_size(payload)
                 if max_size < 256:
                     max_size = DEFAULT_MAX_FRAME_SIZE
                 hello = build_agent_hello(max_size)
@@ -251,8 +242,6 @@ def main():
 
     while True:
         conn, peer = srv.accept()
-        # Single-threaded on purpose: HAProxy opens at most one long-lived
-        # connection per agent, plus health checks that close immediately.
         handle_conn(conn, peer)
 
 
