@@ -134,12 +134,15 @@ check "ACME still allowed"            503 "$(c http://127.0.0.1/.well-known/acme
 echo "== Phase 3: no ca.crt mounted (placeholder CA, mTLS must fail closed)"
 NO_CA=1 start_proxy -v "$WL/geoip.lst:/etc/haproxy/whitelists/geoip.lst:ro" \
                     -v "$WL/asns.lst:/etc/haproxy/whitelists/asns.lst:ro"
-if docker logs "$PREFIX-proxy" 2>&1 | grep -q "placeholder CA"; then
+# Capture the logs first: `docker logs | grep -q` under `set -o pipefail` reports failure
+# when grep exits on the first match and docker logs dies with SIGPIPE (status 141).
+proxy_logs="$(docker logs "$PREFIX-proxy" 2>&1 || true)"
+if grep -q "placeholder CA" <<<"$proxy_logs"; then
   echo "PASS  placeholder CA warning logged"
 else
   echo "FAIL  placeholder CA warning missing"; fail=1
 fi
-if docker logs "$PREFIX-proxy" 2>&1 | grep -q "Couldn't open the ca-file"; then
+if grep -q "Couldn't open the ca-file" <<<"$proxy_logs"; then
   echo "FAIL  HAProxy could not open ca-file"; fail=1
 else
   echo "PASS  HAProxy started without mounted ca.crt"
