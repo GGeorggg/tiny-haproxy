@@ -21,6 +21,13 @@ vulnerabilities:
       inside the container and runs no HTTP server. Waiting for an Alpine/upstream rebuild.
     expired_at: 2027-01-06
 
+  - id: CVE-2026-78661
+    paths:
+      - "usr/local/bin/avahi2dns"
+    statement: >-
+      golang.org/x/net v0.56.0 html denial of service issue in statically compiled avahi2dns binary.
+      avahi2dns serves only local mDNS/DNS traffic on 127.0.0.1 and does not process external HTML input.
+    expired_at: 2027-01-06
 # 2. Misconfigurations (IaC & Dockerfile Check Ignores)
 misconfigurations:
   - id: DS-0002
