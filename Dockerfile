@@ -16,7 +16,7 @@ FROM alpine:edge AS avahi2dns
 RUN apk add --no-cache avahi2dns && cp "$(command -v avahi2dns)" /avahi2dns
 
 # ---- Stage 3: runtime ----
-FROM haproxy:2.8-alpine
+FROM haproxy:3.1-alpine
 
 # Stays root on purpose: dbus-daemon and avahi-daemon need it, and binding ports
 # 80/443 needs it on RouterOS, where the unprivileged-port sysctl cannot be set.
