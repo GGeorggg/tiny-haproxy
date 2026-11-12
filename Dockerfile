@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- Stage 1: download whitelists (build tools never reach the final image) ----
-FROM alpine:3.22 AS whitelists
+FROM alpine:3.24 AS whitelists
 # hadolint ignore=DL3018
 RUN apk add --no-cache curl ca-certificates jq
 COPY --chmod=755 scripts/fetch-whitelists.sh /usr/local/bin/fetch-whitelists.sh
